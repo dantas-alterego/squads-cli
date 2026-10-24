@@ -59,3 +59,23 @@ abnormally.
 Every provider run is recorded in observability (`squads exec list`,
 `squads usage`) with real token and cost figures parsed from the
 executor's output.
+
+## OpenAI (codex)
+
+`--provider openai` runs `codex exec` in the run's worktree with no
+approval prompts. An agent whose tool grants include a file-write tool
+(`Write`, `Edit`, …) gets `--sandbox workspace-write`: writes confined to
+the worktree, and codex blocks network from model-run commands unless its
+config allows it. Any other agent runs `--sandbox read-only`. Codex can't
+scope shell commands, so `Bash(...)` grants alone do not make the lane writable.
+
+- **Model:** `--model` (or frontmatter `model:`) is passed as `-m` only
+  when it is an OpenAI model name (`gpt-*`, `o1`/`o3`/…, `codex-*`). Otherwise
+  `OPENAI_MODEL` is used if set, else codex's own default from
+  `~/.codex/config.toml`. The model codex ran is what the run record shows.
+- **Usage and cost:** tokens come from `codex exec --json`. Cost uses
+  `SQUADS_OPENAI_COST_PER_MTOK_IN` / `_OUT` ($ per million tokens) when both
+  are set, else the OpenAI prices in `src/lib/providers.ts`. Codex counts
+  cached input inside input tokens, so cost is an upper bound when the cache
+  was hit.
+

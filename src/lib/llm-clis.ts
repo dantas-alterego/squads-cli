@@ -8,7 +8,10 @@
  */
 
 import { execSync } from 'child_process';
-import { accessSync, constants as fsConstants } from 'node:fs';
+import { accessSync, readFileSync, constants as fsConstants } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { calcCost } from './providers.js';
 import { parseStreamJson, parseOpencodeJson } from './stream-json.js';
 import { loadProviderRegistry, anthropicCompatEnv, readProviderSecret, type ProviderEntry } from './provider-registry.js';
 
@@ -34,8 +37,30 @@ export interface CLIConfig {
   /**
    * Extract token/cost usage from the CLI's captured output, if the provider
    * prints it. Enables observability records for non-anthropic runs (#824).
+   * `model` is the lane's effective model (see resolveModel), for lanes that
+   * price tokens themselves.
    */
-  parseUsage?: (output: string) => ProviderUsage | null;
+  parseUsage?: (output: string, model?: string) => ProviderUsage | null;
+
+  /**
+   * Spawn with stdin `'ignore'`: CLIs that read piped stdin hang when it is
+   * inherited from a detached/non-TTY parent.
+   */
+  stdinIgnore?: boolean;
+
+  /**
+   * The model the lane will actually run with, for attribution. When set, the
+   * runner records this instead of the caller's model — which may be a Claude
+   * name leaked from frontmatter that the lane ignored (#937). Undefined means
+   * unknown, never the leaked name.
+   */
+  resolveModel?: (options?: RunOptions) => string | undefined;
+
+  /**
+   * Foreground rendering for JSONL lanes without an exec-event adapter: maps
+   * one stdout line to the text shown live (null hides the line).
+   */
+  renderLine?: (line: string) => string | null;
 
   /**
    * The CLI emits Claude Code stream-json (JSONL events), not prose (#1077).
@@ -140,6 +165,91 @@ export function parseOpencodeUsage(output: string): ProviderUsage | null {
 }
 
 /**
+ * The model a codex lane runs with. Agents re-laned to openai keep their
+ * anthropic `model:` frontmatter (`sonnet`, `claude-…`), which the OpenAI API
+ * rejects (#937) — only an OpenAI model name is honored. Otherwise
+ * OPENAI_MODEL, otherwise undefined (codex uses its own config default).
+ */
+export function resolveCodexModel(requested?: string): string | undefined {
+  const name = requested?.replace(/^openai\//, '');
+  if (name && /^(gpt|o\d|codex|chatgpt)/i.test(name)) return name;
+  return process.env.OPENAI_MODEL || undefined;
+}
+
+/**
+ * The default model in codex's own config ($CODEX_HOME/config.toml, top-level
+ * `model = "…"`) — what `codex exec` runs when no `-m` is passed. Attribution
+ * only; unreadable config is unknown, not an error.
+ */
+export function codexConfigModel(): string | undefined {
+  try {
+    const home = process.env.CODEX_HOME || join(homedir(), '.codex');
+    const toml = readFileSync(join(home, 'config.toml'), 'utf-8');
+    // Top-level keys only: stop at the first [table] header.
+    const top = toml.split(/^\s*\[/m)[0];
+    const m = top.match(/^\s*model\s*=\s*["']([^"']+)["']/m);
+    return m ? m[1] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Usage from a `codex exec --json` stream: tokens from every `turn.completed`
+ * event. Cost = tokens × SQUADS_OPENAI_COST_PER_MTOK_IN/OUT when both are set,
+ * else the provider price table (providers.ts) for the lane's model. Codex's
+ * input_tokens already include cached input, so cost is an upper bound when
+ * the cache was hit.
+ */
+export function parseCodexUsage(output: string, model?: string): ProviderUsage | null {
+  let input = 0;
+  let output_ = 0;
+  let found = false;
+  for (const line of output.split('\n')) {
+    if (!line.includes('"turn.completed"')) continue;
+    try {
+      const ev = JSON.parse(line) as { type?: string; usage?: { input_tokens?: number; output_tokens?: number } };
+      if (ev.type !== 'turn.completed' || !ev.usage) continue;
+      found = true;
+      input += ev.usage.input_tokens || 0;
+      output_ += ev.usage.output_tokens || 0;
+    } catch { /* partial line in the tail — skip */ }
+  }
+  if (!found) return null;
+  const inRate = parseFloat(process.env.SQUADS_OPENAI_COST_PER_MTOK_IN || '');
+  const outRate = parseFloat(process.env.SQUADS_OPENAI_COST_PER_MTOK_OUT || '');
+  const cost = Number.isFinite(inRate) && Number.isFinite(outRate)
+    ? (input * inRate + output_ * outRate) / 1_000_000
+    : calcCost('openai', model || '', input, output_);
+  return { input_tokens: input, output_tokens: output_, cost_usd: cost };
+}
+
+/**
+ * Codex sandbox for a lane's compiled tool grants. Codex cannot scope shell
+ * commands the way --allowedTools does, so workspace-write is granted only to
+ * an agent whose contract grants a file-write tool; anything else — including
+ * no allowlist at all — stays read-only, the same fail-closed default as a
+ * claude-harness lane without --allowedTools (#1073).
+ */
+export function codexSandboxMode(allowedTools?: string[]): 'workspace-write' | 'read-only' {
+  const writes = allowedTools?.some((t) => /^(write|edit|multiedit|notebookedit)\b/i.test(t.trim()));
+  return writes ? 'workspace-write' : 'read-only';
+}
+
+/** Live text for a `codex exec --json` line: agent messages only. */
+export function renderCodexLine(line: string): string | null {
+  if (!line.includes('"agent_message"')) return null;
+  try {
+    const ev = JSON.parse(line) as { type?: string; item?: { type?: string; text?: string } };
+    return ev.type === 'item.completed' && ev.item?.type === 'agent_message' && ev.item.text
+      ? ev.item.text
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Parse aider's usage lines, e.g.:
  *   "Tokens: 57k sent, 1.7k received. Cost: $0.02 message, $0.02 session."
  * Multi-message sessions print one line per message — token counts are summed,
@@ -241,12 +351,37 @@ export const LLM_CLIS: Record<string, CLIConfig> = {
     buildArgs: (prompt) => ['--yolo', '--prompt', prompt],
   },
 
+  // codex exec defaults to a read-only sandbox, so the lane could not write
+  // files: an agent granted file writes gets workspace-write, which confines
+  // writes to the lane's worktree (-C); others stay read-only
+  // (codexSandboxMode). approval_policy=never because nobody can answer a
+  // prompt in exec mode.
+  // --json gives a parseable event stream for usage; agent messages render
+  // live via renderLine.
   openai: {
     provider: 'openai',
     displayName: 'OpenAI',
     command: 'codex',
     install: 'npm i -g @openai/codex',
-    buildArgs: (prompt) => ['exec', prompt],
+    buildArgs: (prompt, opts) => {
+      const model = resolveCodexModel(opts?.model);
+      return [
+        'exec',
+        '--json',
+        '--sandbox', codexSandboxMode(opts?.allowedTools),
+        '-c', 'approval_policy="never"',
+        '--skip-git-repo-check',
+        ...(model ? ['-m', model] : []),
+        ...(opts?.cwd ? ['-C', opts.cwd] : []),
+        '--',
+        prompt,
+      ];
+    },
+    resolveModel: (opts) => resolveCodexModel(opts?.model) ?? codexConfigModel(),
+    parseUsage: parseCodexUsage,
+    renderLine: renderCodexLine,
+    // codex exec appends piped stdin to the prompt and waits for its EOF.
+    stdinIgnore: true,
   },
 
   // DeepSeek serves an Anthropic-compatible endpoint (api.deepseek.com/anthropic

@@ -5,6 +5,11 @@ All notable changes to `squads-cli` are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 Releases are also published as [GitHub Releases](https://github.com/agents-squads/squads-cli/releases).
 
+## [Unreleased] — fork dantas-alterego
+
+### Fixed
+- **The OpenAI lane (`codex`) can write files and records what it ran.** `codex exec` now runs in the lane's worktree with `approval_policy="never"`, and with `--sandbox workspace-write` when the agent's grants include a file-write tool (read-only otherwise); before, codex's read-only default meant no agent on the lane could write. `--model` is passed as `-m` when it is an OpenAI model name; an Anthropic name inherited from frontmatter (`sonnet`) is dropped. Runs use `codex exec --json`, so `executions.jsonl` gets input/output tokens and `cost_usd`, and its `model` is the one codex ran (the requested one, `OPENAI_MODEL`, or the default in `~/.codex/config.toml`), not the frontmatter `model:`.
+
 ## [0.10.1] — 2026-10-19
 
 Security patch. No new features.
