@@ -63,10 +63,12 @@ executor's output.
 ## OpenAI (codex)
 
 `--provider openai` runs `codex exec` in the run's worktree with no
-approval prompts. An agent whose tool grants include a file-write tool
-(`Write`, `Edit`, …) gets `--sandbox workspace-write`: writes confined to
+approval prompts. An agent whose tool grants include an unscoped
+file-write tool (`Write`, `Edit`, …) gets `--sandbox workspace-write`: writes confined to
 the worktree, and codex blocks network from model-run commands unless its
-config allows it. Any other agent runs `--sandbox read-only`. Codex can't
+config allows it. Any other agent runs `--sandbox read-only`, including one
+whose write grants are path-scoped (`Write(src/**)`), since codex can't
+express that scope. Codex can't
 scope shell commands, so `Bash(...)` grants alone do not make the lane writable.
 
 - **Model:** `--model` (or frontmatter `model:`) is passed as `-m` only

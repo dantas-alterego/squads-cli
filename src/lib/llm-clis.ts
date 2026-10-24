@@ -225,14 +225,15 @@ export function parseCodexUsage(output: string, model?: string): ProviderUsage |
 }
 
 /**
- * Codex sandbox for a lane's compiled tool grants. Codex cannot scope shell
- * commands the way --allowedTools does, so workspace-write is granted only to
- * an agent whose contract grants a file-write tool; anything else — including
- * no allowlist at all — stays read-only, the same fail-closed default as a
- * claude-harness lane without --allowedTools (#1073).
+ * Codex sandbox for a lane's compiled tool grants. Codex's only write scope is
+ * the whole workspace, so workspace-write is granted only for an UNSCOPED
+ * file-write tool (`Write`, `Edit`, …). A path-scoped grant (`Write(src/**)`)
+ * can't be expressed and is never widened: it runs read-only, as does an
+ * agent with no write grant or no allowlist at all — the same fail-closed
+ * default as a claude-harness lane without --allowedTools (#1073).
  */
 export function codexSandboxMode(allowedTools?: string[]): 'workspace-write' | 'read-only' {
-  const writes = allowedTools?.some((t) => /^(write|edit|multiedit|notebookedit)\b/i.test(t.trim()));
+  const writes = allowedTools?.some((t) => /^(write|edit|multiedit|notebookedit)$/i.test(t.trim()));
   return writes ? 'workspace-write' : 'read-only';
 }
 

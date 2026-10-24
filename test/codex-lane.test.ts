@@ -48,7 +48,9 @@ describe('openai lane args', () => {
     expect(codexSandboxMode([])).toBe('read-only');
     expect(codexSandboxMode(['Read', 'Grep', 'Bash(git:*)'])).toBe('read-only');
     expect(codexSandboxMode(['Read', 'Edit'])).toBe('workspace-write');
-    expect(codexSandboxMode(['Write(src/**)'])).toBe('workspace-write');
+    // A path-scoped write can't be expressed in codex: never widened to the workspace.
+    expect(codexSandboxMode(['Read', 'Write(src/**)', 'Edit(docs/*)'])).toBe('read-only');
+    expect(codexSandboxMode(['Write(src/**)', 'Write'])).toBe('workspace-write');
     const args = LLM_CLIS.openai.buildArgs('x', { allowedTools: ['Read', 'Glob'] });
     expect(args[args.indexOf('--sandbox') + 1]).toBe('read-only');
   });
